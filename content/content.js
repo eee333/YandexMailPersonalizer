@@ -27,6 +27,14 @@
       'div[contenteditable="true"][id^="compose-field-"][aria-label*="Скрыт" i]',
       'div[contenteditable="true"][data-name="bcc"]',
     ],
+    // кнопка раскрытия секции «Копии, От кого»
+    recipientsExpander: [
+      'button.ComposeRecipients-Expander',
+      'button.ComposeRecipientsExpander',
+      'button[class*="ComposeRecipientsExpander"]',
+      'button[class*="ComposeRecipients-Expander"]',
+      'button.ComposeExpanderButton[aria-expanded]',
+    ],
     subject: [
       'input[name="subject"]',
       'input[aria-label*="Тема" i]',
@@ -84,6 +92,9 @@
   function escapeRegex(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
+  function normText(s) {
+    return (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
 
   // ---------- overlay ----------
   function ensureOverlay() {
@@ -101,9 +112,9 @@
     document.body.appendChild(el);
     return el;
   }
-  function showHint(text)  { const el = ensureOverlay(); el.style.borderColor = '#f0c419'; el.style.background = '#fffbe6'; el.textContent = '⏳ ' + text; }
-  function showReady(text) { const el = ensureOverlay(); el.style.borderColor = '#4caf50'; el.style.background = '#e8f5e9'; el.textContent = '✅ ' + text; }
-  function showError(text) { const el = ensureOverlay(); el.style.borderColor = '#f44336'; el.style.background = '#ffebee'; el.textContent = '❌ ' + text; }
+  function showHint(t)  { const el = ensureOverlay(); el.style.borderColor = '#f0c419'; el.style.background = '#fffbe6'; el.textContent = '⏳ ' + t; }
+  function showReady(t) { const el = ensureOverlay(); el.style.borderColor = '#4caf50'; el.style.background = '#e8f5e9'; el.textContent = '✅ ' + t; }
+  function showError(t) { const el = ensureOverlay(); el.style.borderColor = '#f44336'; el.style.background = '#ffebee'; el.textContent = '❌ ' + t; }
   function hideOverlay() { const el = document.getElementById('ymp-overlay'); if (el) el.remove(); }
 
   function reportPhase(phase, error = '') {
@@ -146,7 +157,7 @@
     t.dispatchEvent(makeKeyEvent('keyup', ',', 'Comma', 188));
   }
 
-  // ---------- работа с полями получателей ----------
+  // ---------- поля получателей ----------
   function findInnerInput(field) {
     if (!field) return null;
     if (field.tagName === 'INPUT' || field.tagName === 'TEXTAREA') return field;
@@ -160,18 +171,14 @@
   }
   function placeCursorAtEnd(el) {
     el.focus();
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    range.collapse(false);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    r.collapse(false);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(r);
   }
 
-  /**
-   * Адрес присутствует в поле именно как отдельный токен (не склеен).
-   * Проверяем textContent с границами и наличие листового элемента с текстом = email.
-   */
   function emailAppearsSeparated(field, email) {
     if (!field) return false;
     const lower = email.toLowerCase().trim();
@@ -179,14 +186,10 @@
     const re = new RegExp(`(^|[\\s,;])${escapeRegex(lower)}([\\s,;]|$)`);
     if (re.test(text)) return true;
     for (const le of field.querySelectorAll('*')) {
-      if (le.children.length === 0 && (le.textContent || '').trim().toLowerCase() === lower) {
-        return true;
-      }
+      if (le.children.length === 0 && (le.textContent || '').trim().toLowerCase() === lower) return true;
     }
     return false;
   }
-
-  /** Адрес именно как отдельный «чип» (элемент-обёртка с текстом = email). */
   function isChip(field, email) {
     if (!field) return false;
     const lower = email.toLowerCase().trim();
@@ -195,7 +198,6 @@
       if (c.tagName === 'INPUT' || c.tagName === 'TEXTAREA') continue;
       if (c.childElementCount > 3) continue;
       const txt = (c.textContent || '').trim().toLowerCase();
-      // допускаем чип с «×» рядом: убираем не-буквенные хвостики
       if (txt === lower || txt === lower + '×' || txt === lower + 'x') return true;
     }
     return false;
@@ -218,7 +220,6 @@
         s.addRange(r);
         document.execCommand('delete', false);
       } catch (_) {}
-      // добить оставшиеся чипы-элементы
       const input = findInnerInput(el);
       Array.from(el.children).forEach((c) => {
         if (c !== input && c.getAttribute('contenteditable') !== 'true') c.remove();
@@ -251,42 +252,29 @@
     return null;
   }
 
-  /**
-   * Вставить ровно ОДИН адрес и попытаться закоммитить его как чип.
-   * Ключевое отличие: перед вставкой проверяем, что предыдущее содержимое
-   * уже оканчивается разделителем, и при необходимости добавляем его —
-   * так исключается склейка.
-   */
   async function insertOneRecipient(el, email) {
     const input = findInnerInput(el);
     const target = input || el;
     target.focus();
     await sleep(80);
 
-    // === Способ 1: синтетический paste одного адреса ===
+    // 1) синтетический paste одного адреса
     try {
       const dt = new DataTransfer();
       dt.setData('text/plain', email);
-      target.dispatchEvent(new ClipboardEvent('paste', {
-        bubbles: true, cancelable: true, clipboardData: dt,
-      }));
+      target.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
       await sleep(400);
-    } catch (e) { warn('paste-one failed:', e); }
+    } catch (e) { warn('paste-one:', e); }
 
-    if (isChip(el, email) || emailAppearsSeparated(el, email)) {
-      return true;
-    }
+    if (isChip(el, email) || emailAppearsSeparated(el, email)) return true;
 
-    // === Способ 2: вставка текста вручную ===
+    // 2) ручная вставка с гарантированным разделителем
     if (input) {
       const cur = input.value || '';
       const sep = (cur && !/[\s,;]$/.test(cur)) ? ', ' : '';
       setNativeValue(input, cur + sep + email);
-      input.dispatchEvent(new InputEvent('input', {
-        bubbles: true, cancelable: true, inputType: 'insertText', data: email,
-      }));
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: email }));
     } else if (el.isContentEditable) {
-      // перед вставкой добить разделитель, если он отсутствует
       const txt = (el.textContent || '').replace(/\s+$/, '');
       if (txt && !/[\s,;]$/.test(txt)) {
         placeCursorAtEnd(el);
@@ -300,11 +288,9 @@
     }
     await sleep(350);
 
-    // клик по подсказке
     const sugg = findSuggestion(email);
     if (sugg) { sugg.click(); await sleep(300); if (isChip(el, email)) return true; }
 
-    // Enter / Tab / Comma / blur — по очереди
     dispatchEnter(target); await sleep(300); if (isChip(el, email)) return true;
     dispatchTab(target);   await sleep(300); if (isChip(el, email)) return true;
     dispatchComma(target); await sleep(300); if (isChip(el, email)) return true;
@@ -315,7 +301,6 @@
     return isChip(el, email) || emailAppearsSeparated(el, email);
   }
 
-  /** Поставить `, ` после последнего вставленного текста, если разделителя нет. */
   async function ensureSeparatorAfter(el) {
     const input = findInnerInput(el);
     if (input) {
@@ -328,13 +313,10 @@
       return;
     }
     if (el.isContentEditable) {
-      // ищем последний содержательный текстовый узел
       const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
       let last = null, n;
-      while ((n = walker.nextNode())) {
-        if (n.nodeValue && n.nodeValue.trim()) last = n;
-      }
-      if (!last) return; // всё — чипы, разделитель не нужен
+      while ((n = walker.nextNode())) if (n.nodeValue && n.nodeValue.trim()) last = n;
+      if (!last) return;
       if (/[\s,;]$/.test(last.nodeValue)) return;
       try {
         placeCursorAtEnd(el);
@@ -344,7 +326,6 @@
     }
   }
 
-  /** Диагностика склейки: ищем пары email1+email2 без разделителя. */
   function detectGlue(el, emails) {
     const text = (el.innerText || el.textContent || el.value || '').toLowerCase();
     const glued = [];
@@ -366,31 +347,26 @@
     const input = findInnerInput(el);
     const target = input || el;
 
-    // === Стратегия A: единый paste всех адресов (Yandex создаёт чипы) ===
+    // A: bulk paste
     await clearField(el);
     await sleep(150);
     target.focus();
     await sleep(100);
-
     try {
       const dt = new DataTransfer();
       dt.setData('text/plain', emails.join(', '));
-      target.dispatchEvent(new ClipboardEvent('paste', {
-        bubbles: true, cancelable: true, clipboardData: dt,
-      }));
+      target.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
     } catch (e) { warn('paste-all:', e); }
     await sleep(600);
 
-    const allPresentA = emails.every((e) => isChip(el, e) || emailAppearsSeparated(el, e));
-    const allChipsA   = emails.every((e) => isChip(el, e));
-    if (allPresentA) {
-      log(`recipients filled via paste-all (chips=${allChipsA}, n=${emails.length})`);
+    if (emails.every((e) => isChip(el, e) || emailAppearsSeparated(el, e))) {
+      log(`filled via paste-all (n=${emails.length})`);
       el.dispatchEvent(new Event('blur', { bubbles: true }));
       await sleep(200);
       return;
     }
 
-    // === Стратегия B: по одному, с гарантированными разделителями ===
+    // B: по одному
     log('paste-all incomplete, switching to per-email');
     await clearField(el);
     await sleep(150);
@@ -402,16 +378,12 @@
         const cur = (el.innerText || el.textContent || el.value || '').trim();
         throw new Error(
           `Не удалось добавить адрес «${emails[i]}» (${i + 1}/${emails.length}). ` +
-          `Текущее содержимое поля: "${cur.slice(0, 100)}". Проверьте вручную.`
+          `Содержимое поля: "${cur.slice(0, 100)}". Проверьте вручную.`
         );
       }
-      // ставим разделитель после КАЖДОГО, кроме последнего, если адрес не стал чипом
-      if (!isLast && !isChip(el, emails[i])) {
-        await ensureSeparatorAfter(el);
-      }
+      if (!isLast && !isChip(el, emails[i])) await ensureSeparatorAfter(el);
     }
 
-    // === финальная проверка ===
     await sleep(250);
     const missing = emails.filter((e) => !isChip(el, e) && !emailAppearsSeparated(el, e));
     const glued = detectGlue(el, emails);
@@ -419,58 +391,110 @@
       const parts = [];
       if (missing.length) parts.push(`не попали: ${missing.join(', ')}`);
       if (glued.length) parts.push(`склеены: ${glued.join('; ')}`);
-      throw new Error(
-        `Ошибка заполнения поля: ${parts.join('. ')}. ` +
-        `Проверьте поле вручную перед отправкой.`
-      );
+      throw new Error(`Ошибка заполнения поля: ${parts.join('. ')}. Проверьте вручную.`);
     }
 
     el.dispatchEvent(new Event('blur', { bubbles: true }));
     await sleep(200);
-    log(`recipients filled via per-email (n=${emails.length})`);
+    log(`filled via per-email (n=${emails.length})`);
   }
 
-  // ---------- открытие BCC ----------
-  function findBccToggle() {
-    return qsa(['button', '[role="button"]', 'a', 'span']).find((el) => {
+  // ---------- раскрытие секции «Копии, От кого» ----------
+  function findRecipientsExpander() {
+    // 1) по BEM-классам (стабильно)
+    const byClass = qs(SEL.recipientsExpander);
+    if (byClass && isVisible(byClass)) return byClass;
+
+    // 2) по тексту: должно быть «копии» и «от кого»
+    return qsa(['button', '[role="button"]']).find((el) => {
       if (!isVisible(el)) return false;
-      const t = (el.textContent || '').trim().toLowerCase();
-      return t === 'скрытая копия' || t === 'скрыть' || (t.includes('скрыт') && t.includes('копи'));
+      const t = normText(el.textContent);
+      return t.includes('копии') && t.includes('от кого');
     }) || null;
   }
-  function findCcToggle() {
-    return qsa(['button', '[role="button"]', 'a', 'span']).find((el) => {
-      if (!isVisible(el)) return false;
-      const t = (el.textContent || '').trim().toLowerCase();
-      return t === 'копия' || t === 'добавить копию';
-    }) || null;
+
+  async function ensureRecipientsExpanded() {
+    // если BCC уже видим — раскрывать нечего
+    let bcc = qs(SEL.bccField);
+    if (bcc && isVisible(bcc)) {
+      log('BCC already visible — expander not needed');
+      return true;
+    }
+
+    const expander = findRecipientsExpander();
+    if (!expander) {
+      log('recipients expander NOT found in this UI');
+      return false;
+    }
+
+    const expandedAttr = () => expander.getAttribute('aria-expanded');
+    log('expander found, aria-expanded =', expandedAttr());
+
+    if (expandedAttr() === 'true') {
+      log('already expanded — waiting for BCC field to render');
+      // анимация уже отработала ранее, но поле могло быть ещё не отрисовано
+      await sleep(200);
+      return true;
+    }
+
+    // кликаем и ждём смены aria-expanded ИЛИ появления BCC
+    expander.click();
+    const start = Date.now();
+    while (Date.now() - start < 3500) {
+      await sleep(150);
+      if (expandedAttr() === 'true') {
+        log('expander aria-expanded flipped to true');
+        await sleep(300); // дать анимации закончиться
+        return true;
+      }
+      bcc = qs(SEL.bccField);
+      if (bcc && isVisible(bcc)) {
+        log('BCC visible after expander click');
+        return true;
+      }
+    }
+
+    // повторный клик (иногда Yandex съедает первый)
+    if (expandedAttr() !== 'true') {
+      log('retrying expander click');
+      expander.click();
+      await sleep(700);
+    }
+    return expandedAttr() === 'true';
   }
+
   async function ensureBccOpen() {
+    // 1) уже открыто?
     let bcc = qs(SEL.bccField);
     if (bcc && isVisible(bcc)) return bcc;
 
-    let toggle = findBccToggle();
-    if (toggle) {
-      toggle.click();
+    // 2) раскрыть секцию «Копии, От кого»
+    await ensureRecipientsExpanded();
+
+    // 3) поле должно стать видимым
+    bcc = qs(SEL.bccField);
+    if (bcc && isVisible(bcc)) return bcc;
+
+    // 4) короткое ожидание на анимацию
+    await sleep(800);
+    bcc = qs(SEL.bccField);
+    if (bcc && isVisible(bcc)) return bcc;
+
+    // 5) fallback: старые UI с отдельной ссылкой «Скрытая копия»
+    const legacyToggle = qsa(['button', '[role="button"]', 'a', 'span']).find((el) => {
+      if (!isVisible(el)) return false;
+      const t = normText(el.textContent);
+      return t === 'скрытая копия' || (t.includes('скрыт') && t.includes('копи'));
+    });
+    if (legacyToggle) {
+      log('legacy BCC toggle clicked');
+      legacyToggle.click();
       await sleep(500);
       bcc = qs(SEL.bccField);
       if (bcc && isVisible(bcc)) return bcc;
     }
-    const ccToggle = findCcToggle();
-    if (ccToggle) {
-      ccToggle.click();
-      await sleep(400);
-      toggle = findBccToggle();
-      if (toggle) {
-        toggle.click();
-        await sleep(500);
-        bcc = qs(SEL.bccField);
-        if (bcc && isVisible(bcc)) return bcc;
-      }
-    }
-    await sleep(1000);
-    bcc = qs(SEL.bccField);
-    return bcc && isVisible(bcc) ? bcc : null;
+
+    return null;
   }
 
   // ---------- тема / тело ----------
@@ -517,6 +541,12 @@
     log('doFillGroup', group);
     await ensureComposeOpen();
 
+    // 0) Если группа >1 — раскрыть секцию «Копии, От кого» СРАЗУ,
+    //    чтобы не сработать на невидимое поле позже
+    if (group.emails.length > 1) {
+      await ensureRecipientsExpanded();
+    }
+
     // 1. Кому
     const toField = await waitFor(() => {
       const el = qs(SEL.toField); return el && isVisible(el) ? el : null;
@@ -525,12 +555,12 @@
 
     // 2. Скрытая копия
     if (group.emails.length > 1) {
-      let bcc = qs(SEL.bccField);
-      if (!bcc || !isVisible(bcc)) bcc = await ensureBccOpen();
+      const bcc = await ensureBccOpen();
       if (!bcc) {
-        bcc = await waitFor(() => {
-          const el = qs(SEL.bccField); return el && isVisible(el) ? el : null;
-        }, 8000, 'Поле «Скрытая копия» не удалось открыть');
+        throw new Error(
+          'Поле «Скрытая копия» не удалось открыть. ' +
+          'Проверьте, что в форме письма доступна кнопка «Копии, От кого».'
+        );
       }
       await fillRecipientField(bcc, group.emails.slice(1));
     }
@@ -539,7 +569,7 @@
     showHint(`Письмо для «${group.name}». Выберите шаблон вручную в форме письма.`);
     reportPhase('waiting_template');
 
-    // 4. Ждём шаблон
+    // 4. Шаблон
     const tmpl = await waitForTemplate(120000);
     if (!tmpl.ok) throw new Error(tmpl.error);
     if (!tmpl.subject) throw new Error('Тема письма пуста после выбора шаблона.');
@@ -558,7 +588,7 @@
       body.innerHTML = body.innerHTML.split('{Имя}').join(group.name);
     }
 
-    // 7. Финальная верификация получателей
+    // 7. Финальная верификация
     await sleep(300);
     const toNow = qs(SEL.toField);
     if (!toNow || (!isChip(toNow, group.emails[0]) && !emailAppearsSeparated(toNow, group.emails[0]))) {
@@ -581,7 +611,7 @@
           const parts = [];
           if (remainMissing.length) parts.push(`не попали: ${remainMissing.join(', ')}`);
           if (glued.length) parts.push(`склеены: ${glued.join('; ')}`);
-          throw new Error(`«Скрытая копия» заполнена не полностью — ${parts.join('. ')}. Добавьте адреса вручную.`);
+          throw new Error(`«Скрытая копия» заполнена не полностью — ${parts.join('. ')}.`);
         }
       }
     }
@@ -607,5 +637,5 @@
     return false;
   });
 
-  log('content script loaded (v3 — no-glue recipient filler)');
+  log('content script loaded (v4 — auto-expand recipients, no-glue fill)');
 })();
